@@ -1,4 +1,4 @@
- 
+
 <!DOCTYPE html>
 <html lang="th">
 <head>
@@ -192,6 +192,78 @@
     const coordY = document.getElementById("coordY");
     const detectedStatus = document.getElementById("detectedStatus");
     const ctx = canvasOutput.getContext("2d");
+
+
+    // ========================================
+    // TouchDesigner WebSocket Bridge
+    // ทุกอย่างอยู่ใน index.html ไฟล์เดียว
+    // เปลี่ยน URL ให้เป็น Cloudflare Tunnel ปัจจุบันของเครื่องที่รัน Node.js
+    // ========================================
+    const TD_WEBSOCKET_URL =
+      "wss://recovery-nose-evanescence-wolf.trycloudflare.com";
+
+    let tdSocket = null;
+    let tdReconnectTimer = null;
+    let tdLastSendTime = 0;
+    const TD_SEND_INTERVAL = 50; // ส่งได้สูงสุดประมาณ 20 ครั้ง/วินาที
+
+    function connectTouchDesigner() {
+      if (tdSocket &&
+          (tdSocket.readyState === WebSocket.OPEN ||
+           tdSocket.readyState === WebSocket.CONNECTING)) {
+        return;
+      }
+
+      try {
+        tdSocket = new WebSocket(TD_WEBSOCKET_URL);
+
+        tdSocket.addEventListener("open", () => {
+          console.log("TouchDesigner bridge: WebSocket connected");
+          status.textContent =
+            "สถานะ: เชื่อมต่อสะพานส่งข้อมูลแล้ว เปิดกล้องเพื่อเริ่มใช้งาน";
+        });
+
+        tdSocket.addEventListener("message", (event) => {
+          console.log("Bridge:", event.data);
+        });
+
+        tdSocket.addEventListener("error", (error) => {
+          console.warn("TouchDesigner WebSocket error:", error);
+        });
+
+        tdSocket.addEventListener("close", () => {
+          console.warn("TouchDesigner WebSocket disconnected; retrying...");
+          if (tdReconnectTimer) clearTimeout(tdReconnectTimer);
+          tdReconnectTimer = setTimeout(connectTouchDesigner, 2000);
+        });
+      } catch (error) {
+        console.error("เปิด WebSocket ไม่สำเร็จ:", error);
+        if (tdReconnectTimer) clearTimeout(tdReconnectTimer);
+        tdReconnectTimer = setTimeout(connectTouchDesigner, 2000);
+      }
+    }
+
+    function sendXYToTouchDesigner(x, y) {
+      if (!tdSocket || tdSocket.readyState !== WebSocket.OPEN) return;
+
+      const now = Date.now();
+      if (now - tdLastSendTime < TD_SEND_INTERVAL) return;
+      tdLastSendTime = now;
+
+      const safeX = Math.max(0, Math.min(1, Number(x)));
+      const safeY = Math.max(0, Math.min(1, Number(y)));
+
+      if (!Number.isFinite(safeX) || !Number.isFinite(safeY)) return;
+
+      try {
+        tdSocket.send(JSON.stringify({ x: safeX, y: safeY }));
+      } catch (error) {
+        console.error("ส่งค่า X/Y ไม่สำเร็จ:", error);
+      }
+    }
+
+    // เริ่มเชื่อมต่ออัตโนมัติ และเชื่อมต่อใหม่หากหลุด
+    connectTouchDesigner();
 
     let stream = null;
     let isOpenCvReady = false;
@@ -774,6 +846,7 @@
           );
 
           displayCoordinates(xy.x, xy.y, true);
+          sendXYToTouchDesigner(xy.x, xy.y);
 
           status.textContent =
             "สถานะ: ตรวจพบและติดตามกรอบที่ล็อกไว้แล้ว";
@@ -801,6 +874,7 @@
             lastGoodXY.y,
             true
           );
+          sendXYToTouchDesigner(lastGoodXY.x, lastGoodXY.y);
 
           status.textContent =
             `สถานะ: กรอบถูกล็อกไว้ กำลังค้นหากรอบเดิมอีกครั้ง (${lostFrames} เฟรม)`;
@@ -921,7 +995,7 @@
       }
     }
 
-    // เปิด/ปิดกล้อง ไม่มีการส่งข้อมูลออกจากเว็บ
+    // เปิด/ปิดกล้อง โดยระบบส่งค่า X/Y ไป TouchDesigner เมื่อมีเป้าหมายที่ล็อกแล้ว
     button.addEventListener("click", async () => {
       if (!isOpenCvReady) return;
 
