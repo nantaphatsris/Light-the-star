@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="th">
 <head>
@@ -6,9 +7,7 @@
   <title>Night Sky Tracker - Rectangle Selector</title>
 
   <style>
-    * {
-      box-sizing: border-box;
-    }
+    * { box-sizing: border-box; }
 
     body {
       margin: 0;
@@ -42,12 +41,10 @@
       border-radius: 12px;
       overflow: hidden;
       touch-action: manipulation;
-      cursor: pointer;
+      cursor: crosshair;
     }
 
-    video {
-      display: none;
-    }
+    video { display: none; }
 
     canvas#canvasOutput {
       display: block;
@@ -56,7 +53,6 @@
       object-fit: contain;
     }
 
-    /* วงกลมอ้างอิงตรงกลาง (0, 0) */
     .crosshair {
       position: absolute;
       width: 20px;
@@ -82,7 +78,6 @@
       transform: translate(-50%, -50%);
     }
 
-    /* กล่องแสดงพิกัด */
     .coordinates {
       position: absolute;
       left: 12px;
@@ -143,8 +138,11 @@
     }
   </style>
 
-  <!-- โหลด OpenCV.js -->
-  <script async src="https://docs.opencv.org/4.x/opencv.js" onload="onOpenCvReady();"></script>
+  <script
+    async
+    src="https://docs.opencv.org/4.x/opencv.js"
+    onload="onOpenCvReady();">
+  </script>
 </head>
 
 <body>
@@ -157,26 +155,30 @@
       <video id="camera" autoplay playsinline muted></video>
       <canvas id="canvasOutput"></canvas>
 
-      <!-- จุดกำเนิดพิกัด (0,0) -->
       <div class="crosshair"></div>
 
-      <!-- แสดงพิกัด -->
       <div class="coordinates">
-        Target Selected: <span id="detectedStatus" style="color: #ff4d4d;">NO</span><br>
-        X: <span id="coordX">0</span> px<br>
-        Y: <span id="coordY">0</span> px
+        Target Selected:
+        <span id="detectedStatus" style="color: #ff4d4d;">NO</span>
+        <br>
+        X: <span id="coordX">0.00</span>
+        <br>
+        Y: <span id="coordY">0.00</span>
       </div>
     </div>
 
     <div class="controls">
-      <button id="startCamera" disabled>กำลังโหลด OpenCV.js...</button>
+      <button id="startCamera" disabled>
+        กำลังโหลด OpenCV.js...
+      </button>
     </div>
 
     <div id="status">สถานะ: รอโหลด OpenCV.js</div>
 
     <div class="hint">
-      * ระบบจะตรวจจับรูปทรงสี่เหลี่ยมทั้งหมดในกล้อง (กรอบสีเหลือง)<br>
-      * <b>แตะ/จิ้ม ที่สี่เหลี่ยมบนหน้าจอ</b> เพื่อเลือกเป็นเป้าหมาย (กรอบจะเปลี่ยนเป็นสีเขียว)
+      * กรอบสีส้มคือรูปทรงสี่เหลี่ยมที่ตรวจพบ<br>
+      * แตะภายในกรอบที่ต้องการเลือก กรอบจะเปลี่ยนเป็นสีเขียวอมฟ้า<br>
+      * X/Y คือพิกัดจุดเล็งกลางภาพภายในกรอบที่เลือก มีค่าระหว่าง 0.00–1.00
     </div>
   </main>
 
@@ -189,206 +191,754 @@
     const coordX = document.getElementById("coordX");
     const coordY = document.getElementById("coordY");
     const detectedStatus = document.getElementById("detectedStatus");
+    const ctx = canvasOutput.getContext("2d");
 
     let stream = null;
     let isOpenCvReady = false;
     let isProcessing = false;
 
-    // ตัวแปรเก็บพิกัดการแตะเลือกของผู้ใช้ (บนหน้าจอ)
     let selectedPoint = null;
+    let selectedQuad = null;
+    let lostFrames = 0;
+    let previousQuadCenter = null;
+    let lastGoodXY = { x: 0, y: 0 };
 
-    // เรียกเมื่อ OpenCV.js โหลดเสร็จสิ้น
+    const MAX_LOST_FRAMES = 18;
+    const MIN_AREA_RATIO = 0.008;
+    const MAX_AREA_RATIO = 0.92;
+
+    // เตรียม OpenCV.js
     function onOpenCvReady() {
-      isOpenCvReady = true;
-      status.textContent = "สถานะ: OpenCV.js พร้อมทำงาน กดเปิดกล้องได้เลย";
-      button.textContent = "เปิดกล้องส่องหา";
-      button.disabled = false;
-    }
+      if (typeof cv === "undefined") {
+        status.textContent =
+          "โหลด OpenCV.js ไม่สำเร็จ ลองรีเฟรชหน้าเว็บ";
+        return;
+      }
 
-    // ฟังก์ชันคำนวณตำแหน่งการแตะบนหน้าจอ แปลงเป็นพิกัดภาพ Canvas
-    cameraView.addEventListener("pointerdown", (e) => {
-      const rect = cameraView.getBoundingClientRect();
-      const clickX = e.clientX - rect.left;
-      const clickY = e.clientY - rect.top;
-
-      // แปลงอัตราส่วนตำแหน่งแตะให้ตรงกับขนาดจริงของ Canvas
-      const scaleX = canvasOutput.width / rect.width;
-      const scaleY = canvasOutput.height / rect.height;
-
-      selectedPoint = {
-        x: clickX * scaleX,
-        y: clickY * scaleY
+      cv.onRuntimeInitialized = () => {
+        isOpenCvReady = true;
+        status.textContent =
+          "สถานะ: OpenCV.js พร้อมทำงาน กดเปิดกล้องได้เลย";
+        button.textContent = "เปิดกล้องส่องหา";
+        button.disabled = false;
       };
-    });
 
-    // แสดงค่าพิกัดบน UI
-    function displayCoordinates(x, y, isFound) {
-      coordX.textContent = Math.round(x);
-      coordY.textContent = Math.round(y);
-      if (isFound) {
-        detectedStatus.textContent = "YES";
-        detectedStatus.style.color = "#0bf4ec";
-      } else {
-        detectedStatus.textContent = "NO";
-        detectedStatus.style.color = "#ff4d4d";
+      if (cv.Mat) {
+        isOpenCvReady = true;
+        status.textContent =
+          "สถานะ: OpenCV.js พร้อมทำงาน กดเปิดกล้องได้เลย";
+        button.textContent = "เปิดกล้องส่องหา";
+        button.disabled = false;
       }
     }
 
-    // ฟังก์ชันประมวลผลตรวจจับรูปทรงสี่เหลี่ยม (Shape Detection / Contours)
+    function setTargetStatus(found) {
+      detectedStatus.textContent = found ? "YES" : "NO";
+      detectedStatus.style.color =
+        found ? "#0bf4ec" : "#ff4d4d";
+    }
+
+    function displayCoordinates(x, y, found) {
+      coordX.textContent = Number(x).toFixed(2);
+      coordY.textContent = Number(y).toFixed(2);
+      setTargetStatus(found);
+    }
+
+    // แปลงตำแหน่งที่แตะบนจอเป็นพิกัดจริงของภาพกล้อง
+    function pointerToFrame(clientX, clientY) {
+      if (!canvasOutput.width || !canvasOutput.height) {
+        return null;
+      }
+
+      const rect = canvasOutput.getBoundingClientRect();
+
+      const scale = Math.min(
+        rect.width / canvasOutput.width,
+        rect.height / canvasOutput.height
+      );
+
+      const shownWidth = canvasOutput.width * scale;
+      const shownHeight = canvasOutput.height * scale;
+
+      const offsetX = (rect.width - shownWidth) / 2;
+      const offsetY = (rect.height - shownHeight) / 2;
+
+      const x = (clientX - rect.left - offsetX) / scale;
+      const y = (clientY - rect.top - offsetY) / scale;
+
+      if (
+        x < 0 || y < 0 ||
+        x > canvasOutput.width ||
+        y > canvasOutput.height
+      ) {
+        return null;
+      }
+
+      return { x, y };
+    }
+
+    cameraView.addEventListener("pointerdown", (event) => {
+      const point = pointerToFrame(
+        event.clientX,
+        event.clientY
+      );
+
+      if (point) {
+        selectedPoint = point;
+        status.textContent =
+          "เลือกตำแหน่งแล้ว กำลังค้นหากรอบที่แตะ...";
+      }
+    });
+
+    // ตรวจว่าจุดที่แตะอยู่ภายในรูปสี่เหลี่ยมหรือไม่
+    function polygonContainsPoint(point, quad) {
+      let inside = false;
+
+      for (
+        let i = 0, j = quad.length - 1;
+        i < quad.length;
+        j = i++
+      ) {
+        const xi = quad[i].x;
+        const yi = quad[i].y;
+        const xj = quad[j].x;
+        const yj = quad[j].y;
+
+        const intersects =
+          ((yi > point.y) !== (yj > point.y)) &&
+          (
+            point.x <
+            (xj - xi) * (point.y - yi) /
+            ((yj - yi) || 1e-9) + xi
+          );
+
+        if (intersects) inside = !inside;
+      }
+
+      return inside;
+    }
+
+    function polygonArea(points) {
+      let area = 0;
+
+      for (let i = 0; i < points.length; i++) {
+        const a = points[i];
+        const b = points[(i + 1) % points.length];
+
+        area += a.x * b.y - b.x * a.y;
+      }
+
+      return Math.abs(area / 2);
+    }
+
+    function centerOf(points) {
+      return {
+        x: points.reduce((sum, p) => sum + p.x, 0) /
+          points.length,
+        y: points.reduce((sum, p) => sum + p.y, 0) /
+          points.length
+      };
+    }
+
+    // เรียงมุมของกรอบเพื่อให้ได้ TL, TR, BR, BL
+    function orderQuad(points) {
+      const center = centerOf(points);
+
+      const sorted = points.slice().sort((a, b) =>
+        Math.atan2(a.y - center.y, a.x - center.x) -
+        Math.atan2(b.y - center.y, b.x - center.x)
+      );
+
+      let start = 0;
+      let minSum = Infinity;
+
+      sorted.forEach((p, i) => {
+        const sum = p.x + p.y;
+
+        if (sum < minSum) {
+          minSum = sum;
+          start = i;
+        }
+      });
+
+      let ordered = sorted
+        .slice(start)
+        .concat(sorted.slice(0, start));
+
+      const cross =
+        (ordered[1].x - ordered[0].x) *
+        (ordered[2].y - ordered[1].y) -
+        (ordered[1].y - ordered[0].y) *
+        (ordered[2].x - ordered[1].x);
+
+      if (cross < 0) {
+        ordered = [
+          ordered[0],
+          ordered[3],
+          ordered[2],
+          ordered[1]
+        ];
+      }
+
+      if (ordered[1].x < ordered[3].x) {
+        ordered = [
+          ordered[0],
+          ordered[3],
+          ordered[2],
+          ordered[1]
+        ];
+      }
+
+      return ordered;
+    }
+
+    // ตรวจหารูปสี่เหลี่ยมจากภาพกล้อง
+    function extractCandidates(srcMat, width, height) {
+      const candidates = [];
+
+      let gray = new cv.Mat();
+      let blurred = new cv.Mat();
+      let edges = new cv.Mat();
+      let closed = new cv.Mat();
+      let contours = new cv.MatVector();
+      let hierarchy = new cv.Mat();
+      let kernel = null;
+
+      try {
+        cv.cvtColor(srcMat, gray, cv.COLOR_RGBA2GRAY);
+
+        cv.GaussianBlur(
+          gray,
+          blurred,
+          new cv.Size(5, 5),
+          0
+        );
+
+        cv.Canny(blurred, edges, 40, 130);
+
+        // เชื่อมช่องว่างเล็ก ๆ ของเส้นขอบ
+        kernel = cv.getStructuringElement(
+          cv.MORPH_RECT,
+          new cv.Size(5, 5)
+        );
+
+        cv.morphologyEx(
+          edges,
+          closed,
+          cv.MORPH_CLOSE,
+          kernel
+        );
+
+        cv.findContours(
+          closed,
+          contours,
+          hierarchy,
+          cv.RETR_LIST,
+          cv.CHAIN_APPROX_SIMPLE
+        );
+
+        const imageArea = width * height;
+
+        for (let i = 0; i < contours.size(); i++) {
+          const contour = contours.get(i);
+          const approx = new cv.Mat();
+
+          try {
+            const area = Math.abs(
+              cv.contourArea(contour)
+            );
+
+            const ratio = area / imageArea;
+
+            if (
+              ratio < MIN_AREA_RATIO ||
+              ratio > MAX_AREA_RATIO
+            ) {
+              continue;
+            }
+
+            const perimeter = cv.arcLength(contour, true);
+
+            cv.approxPolyDP(
+              contour,
+              approx,
+              0.025 * perimeter,
+              true
+            );
+
+            if (
+              approx.rows !== 4 ||
+              !cv.isContourConvex(approx)
+            ) {
+              continue;
+            }
+
+            const points = [];
+
+            for (let j = 0; j < 4; j++) {
+              const ptr = approx.intPtr(j, 0);
+
+              points.push({
+                x: ptr[0],
+                y: ptr[1]
+              });
+            }
+
+            const ordered = orderQuad(points);
+            const areaQuad = polygonArea(ordered);
+
+            if (areaQuad < 0.008 * imageArea) {
+              continue;
+            }
+
+            const xs = ordered.map(p => p.x);
+            const ys = ordered.map(p => p.y);
+
+            const boxW =
+              Math.max(...xs) - Math.min(...xs);
+
+            const boxH =
+              Math.max(...ys) - Math.min(...ys);
+
+            if (
+              boxW < width * 0.12 ||
+              boxH < height * 0.07
+            ) {
+              continue;
+            }
+
+            const ratioWH = boxW / Math.max(boxH, 1);
+
+            if (ratioWH < 0.75 || ratioWH > 5.5) {
+              continue;
+            }
+
+            const center = centerOf(ordered);
+
+            candidates.push({
+              points: ordered,
+              area: areaQuad,
+              center
+            });
+          } finally {
+            approx.delete();
+            contour.delete();
+          }
+        }
+      } finally {
+        gray.delete();
+        blurred.delete();
+        edges.delete();
+        closed.delete();
+        contours.delete();
+        hierarchy.delete();
+
+        if (kernel) kernel.delete();
+      }
+
+      return candidates;
+    }
+
+    // เลือกกรอบที่แตะ หรือค้นหากรอบเดิมต่อ
+    function chooseCandidate(candidates) {
+      if (!candidates.length) return null;
+
+      if (selectedPoint) {
+        const tapped = candidates
+          .filter(c =>
+            polygonContainsPoint(selectedPoint, c.points)
+          )
+          .sort((a, b) => b.area - a.area)[0];
+
+        if (tapped) {
+          selectedQuad = tapped.points;
+          previousQuadCenter = tapped.center;
+          selectedPoint = null;
+          lostFrames = 0;
+
+          status.textContent =
+            "เลือกกรอบแล้ว กำลังติดตามกรอบที่เลือก";
+
+          return tapped;
+        }
+
+        return null;
+      }
+
+      if (selectedQuad && previousQuadCenter) {
+        const maxDistance =
+          Math.max(
+            canvasOutput.width,
+            canvasOutput.height
+          ) * 0.22;
+
+        const nearby = candidates
+          .map(c => ({
+            ...c,
+            distance: Math.hypot(
+              c.center.x - previousQuadCenter.x,
+              c.center.y - previousQuadCenter.y
+            )
+          }))
+          .filter(c => c.distance <= maxDistance)
+          .sort((a, b) => a.distance - b.distance);
+
+        if (nearby.length) return nearby[0];
+
+        return null;
+      }
+
+      return null;
+    }
+
+    // คำนวณพิกัดจุดกลางภาพในกรอบที่เลือก
+    function calculateNormalizedXY(quad, width, height) {
+      let source = null;
+      let destination = null;
+      let transform = null;
+      let centerPoint = null;
+      let result = null;
+
+      try {
+        source = cv.matFromArray(
+          4, 1, cv.CV_32FC2,
+          quad.flatMap(p => [p.x, p.y])
+        );
+
+        destination = cv.matFromArray(
+          4, 1, cv.CV_32FC2,
+          [0, 0, 1, 0, 1, 1, 0, 1]
+        );
+
+        transform = cv.getPerspectiveTransform(
+          source,
+          destination
+        );
+
+        centerPoint = cv.matFromArray(
+          1, 1, cv.CV_32FC2,
+          [width / 2, height / 2]
+        );
+
+        result = new cv.Mat();
+
+        cv.perspectiveTransform(
+          centerPoint,
+          result,
+          transform
+        );
+
+        const rawX = result.data32F[0];
+        const rawY = result.data32F[1];
+
+        if (
+          !Number.isFinite(rawX) ||
+          !Number.isFinite(rawY)
+        ) {
+          return lastGoodXY;
+        }
+
+        const x = Math.max(0, Math.min(1, rawX));
+        const y = Math.max(0, Math.min(1, rawY));
+
+        lastGoodXY = { x, y };
+
+        return lastGoodXY;
+      } catch (error) {
+        console.error("คำนวณพิกัดไม่สำเร็จ:", error);
+        return lastGoodXY;
+      } finally {
+        [
+          source,
+          destination,
+          transform,
+          centerPoint,
+          result
+        ].forEach(mat => {
+          if (mat) mat.delete();
+        });
+      }
+    }
+
     function processVideo() {
       if (!isProcessing) return;
 
-      const width = camera.videoWidth;
-      const height = camera.videoHeight;
-
-      if (width === 0 || height === 0) {
+      if (!camera.videoWidth || !camera.videoHeight) {
         requestAnimationFrame(processVideo);
         return;
       }
 
-      if (canvasOutput.width !== width || canvasOutput.height !== height) {
+      const width = camera.videoWidth;
+      const height = camera.videoHeight;
+
+      if (
+        canvasOutput.width !== width ||
+        canvasOutput.height !== height
+      ) {
         canvasOutput.width = width;
         canvasOutput.height = height;
       }
 
-      const ctx = canvasOutput.getContext("2d");
       ctx.drawImage(camera, 0, 0, width, height);
 
+      let srcMat = null;
+
       try {
-        let srcMat = cv.imread(canvasOutput);
-        let grayMat = new cv.Mat();
-        let blurredMat = new cv.Mat();
-        let thresholdMat = new cv.Mat();
-        let contours = new cv.MatVector();
-        let hierarchy = new cv.Mat();
+        srcMat = cv.imread(canvasOutput);
 
-        // 1. แปลงเป็นสีเทา + ลด Noise
-        cv.cvtColor(srcMat, grayMat, cv.COLOR_RGBA2GRAY);
-        cv.GaussianBlur(grayMat, blurredMat, new cv.Size(5, 5), 0);
-        
-        // 2. หาขอบภาพด้วย Canny
-        cv.Canny(blurredMat, thresholdMat, 50, 150);
+        const candidates = extractCandidates(
+          srcMat,
+          width,
+          height
+        );
 
-        // 3. ค้นหาเส้นขอบวัตถุ (Contours)
-        cv.findContours(thresholdMat, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+        const chosen = chooseCandidate(candidates);
 
-        let targetFound = false;
+        if (chosen) {
+          selectedQuad = chosen.points.map(p => ({
+            x: p.x,
+            y: p.y
+          }));
 
-        // 4. วนลูปเช็คว่า Contour ไหนเป็น "สี่เหลี่ยม"
-        for (let i = 0; i < contours.size(); ++i) {
-          let cnt = contours.get(i);
-          let peri = cv.arcLength(cnt, true);
-          let approx = new cv.Mat();
+          previousQuadCenter = { ...chosen.center };
+          lostFrames = 0;
 
-          // ปรับระดับความโค้งเพื่อย่อมุม (Approximation)
-          cv.approxPolyDP(cnt, approx, 0.04 * peri, true);
+          const xy = calculateNormalizedXY(
+            selectedQuad,
+            width,
+            height
+          );
 
-          // ถ้ามี 4 มุม และมีพื้นที่มากพอ
-          let area = cv.contourArea(cnt);
-          if (approx.rows === 4 && area > 1000) {
-            let rect = cv.boundingRect(approx);
+          displayCoordinates(xy.x, xy.y, true);
 
-            // เช็คว่าผู้ใช้แตะเลือกสี่เหลี่ยมรูปนี้หรือไม่
-            let isSelected = false;
-            if (selectedPoint) {
-              if (
-                selectedPoint.x >= rect.x &&
-                selectedPoint.x <= rect.x + rect.width &&
-                selectedPoint.y >= rect.y &&
-                selectedPoint.y <= rect.y + rect.height
-              ) {
-                isSelected = true;
-                targetFound = true;
+          status.textContent =
+            "สถานะ: ตรวจพบและติดตามกรอบแล้ว";
 
-                // คำนวณพิกัดกึ่งกลางสี่เหลี่ยมเทียบกับจุดกึ่งกลางหน้าจอ (0, 0)
-                const objectCenterX = rect.x + rect.width / 2;
-                const objectCenterY = rect.y + rect.height / 2;
-                const screenCenterX = width / 2;
-                const screenCenterY = height / 2;
+          drawFrameOverlays(
+            srcMat,
+            candidates,
+            selectedQuad
+          );
+        } else if (
+          selectedQuad &&
+          lostFrames < MAX_LOST_FRAMES
+        ) {
+          lostFrames++;
 
-                const relX = objectCenterX - screenCenterX;
-                const relY = screenCenterY - objectCenterY;
+          drawOpenCvPolygon(
+            srcMat,
+            selectedQuad,
+            "#0bf4ec",
+            3
+          );
 
-                displayCoordinates(relX, relY, true);
+          displayCoordinates(
+            lastGoodXY.x,
+            lastGoodXY.y,
+            true
+          );
 
-                // วาดกรอบสีเขียวสด (Target Selected)
-                let p1 = new cv.Point(rect.x, rect.y);
-                let p2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
-                cv.rectangle(srcMat, p1, p2, [11, 244, 236, 255], 4);
-              }
-            }
+          status.textContent =
+            `สถานะ: กำลังค้นหากรอบเดิมอีกครั้ง (${lostFrames}/${MAX_LOST_FRAMES})`;
 
-            // สี่เหลี่ยมอื่นๆ ที่ยังไม่ได้กดเลือก ให้วาดกรอบสีเหลือง/ส้มบางๆ ไว้
-            if (!isSelected) {
-              let p1 = new cv.Point(rect.x, rect.y);
-              let p2 = new cv.Point(rect.x + rect.width, rect.y + rect.height);
-              cv.rectangle(srcMat, p1, p2, [255, 180, 0, 200], 2);
-            }
+          drawFrameOverlays(
+            srcMat,
+            candidates,
+            selectedQuad
+          );
+        } else {
+          lostFrames++;
+
+          if (lostFrames >= MAX_LOST_FRAMES) {
+            selectedQuad = null;
+            previousQuadCenter = null;
           }
-          approx.delete();
-        }
 
-        if (!targetFound && !selectedPoint) {
           displayCoordinates(0, 0, false);
+
+          status.textContent = selectedPoint
+            ? "สถานะ: แตะภายในกรอบที่ต้องการเลือก"
+            : "สถานะ: กำลังค้นหารูปทรงสี่เหลี่ยม...";
+
+          drawFrameOverlays(
+            srcMat,
+            candidates,
+            null
+          );
         }
 
-        cv.imshow("canvasOutput", srcMat);
+        cv.imshow(canvasOutput, srcMat);
+      } catch (error) {
+        console.error("OpenCV error:", error);
 
-        // คืนการถือครอง Memory ของ OpenCV
-        srcMat.delete();
-        grayMat.delete();
-        blurredMat.delete();
-        thresholdMat.delete();
-        contours.delete();
-        hierarchy.delete();
-
-      } catch (err) {
-        console.error(err);
+        status.textContent =
+          "เกิดข้อผิดพลาดในการตรวจจับ ดูรายละเอียดใน Console";
+      } finally {
+        if (srcMat) srcMat.delete();
       }
 
       requestAnimationFrame(processVideo);
     }
 
-    // ปุ่มเปิด/ปิด กล้อง
-    button.addEventListener("click", async () => {
-      if (!isOpenCvReady) return;
+    // วาดกรอบตามมุมจริงทั้งสี่มุม
+    function drawOpenCvPolygon(
+      mat,
+      points,
+      color,
+      thickness
+    ) {
+      const cvColor =
+        color === "#0bf4ec"
+          ? new cv.Scalar(11, 244, 236, 255)
+          : new cv.Scalar(255, 180, 0, 255);
 
-      try {
-        if (!navigator.mediaDevices?.getUserMedia) {
-          throw new Error("เบราว์เซอร์ไม่รองรับการเปิดกล้อง (กรุณารันผ่าน HTTPS หรือ localhost)");
-        }
+      for (let i = 0; i < points.length; i++) {
+        const a = points[i];
+        const b = points[(i + 1) % points.length];
 
-        if (stream) {
-          isProcessing = false;
-          stream.getTracks().forEach(track => track.stop());
-          stream = null;
-          button.textContent = "เปิดกล้องส่องหา";
-          status.textContent = "สถานะ: ปิดกล้องแล้ว";
-          selectedPoint = null;
+        cv.line(
+          mat,
+          new cv.Point(
+            Math.round(a.x),
+            Math.round(a.y)
+          ),
+          new cv.Point(
+            Math.round(b.x),
+            Math.round(b.y)
+          ),
+          cvColor,
+          thickness
+        );
+
+        cv.circle(
+          mat,
+          new cv.Point(
+            Math.round(a.x),
+            Math.round(a.y)
+          ),
+          6,
+          cvColor,
+          -1
+        );
+      }
+    }
+
+    // วาดกรอบที่ตรวจพบทั้งหมด
+    function drawFrameOverlays(
+      mat,
+      candidates,
+      chosenPoints
+    ) {
+      candidates.forEach(c => {
+        if (
+          chosenPoints &&
+          c.points.every((p, i) =>
+            Math.hypot(
+              p.x - chosenPoints[i].x,
+              p.y - chosenPoints[i].y
+            ) < 3
+          )
+        ) {
           return;
         }
 
+        drawOpenCvPolygon(
+          mat,
+          c.points,
+          "orange",
+          2
+        );
+      });
+
+      if (chosenPoints) {
+        drawOpenCvPolygon(
+          mat,
+          chosenPoints,
+          "#0bf4ec",
+          4
+        );
+      }
+    }
+
+    // เปิด/ปิดกล้อง ไม่มีการส่งข้อมูลออกจากเว็บ
+    button.addEventListener("click", async () => {
+      if (!isOpenCvReady) return;
+
+      if (stream) {
+        isProcessing = false;
+
+        stream.getTracks().forEach(track => track.stop());
+
+        stream = null;
+        camera.srcObject = null;
+
+        selectedPoint = null;
+        selectedQuad = null;
+        previousQuadCenter = null;
+        lostFrames = 0;
+
+        displayCoordinates(0, 0, false);
+
+        ctx.clearRect(
+          0,
+          0,
+          canvasOutput.width,
+          canvasOutput.height
+        );
+
+        button.textContent = "เปิดกล้องส่องหา";
+        status.textContent = "สถานะ: ปิดกล้องแล้ว";
+
+        return;
+      }
+
+      try {
+        if (!navigator.mediaDevices?.getUserMedia) {
+          throw new Error(
+            "เบราว์เซอร์ไม่รองรับกล้อง กรุณาเปิดผ่าน HTTPS หรือ localhost"
+          );
+        }
+
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: { ideal: "environment" } },
+          video: {
+            facingMode: { ideal: "environment" }
+          },
           audio: false
         });
 
         camera.srcObject = stream;
+
         await camera.play();
 
         isProcessing = true;
-        status.textContent = "สถานะ: กล้องกำลังทำงาน แตะสี่เหลี่ยมบนหน้าจอเพื่อเลือก Target";
+
         button.textContent = "ปิดกล้อง";
 
-        requestAnimationFrame(processVideo);
+        status.textContent =
+          "สถานะ: กล้องทำงานแล้ว แตะภายในกรอบเพื่อเลือกเป้าหมาย";
 
+        requestAnimationFrame(processVideo);
       } catch (error) {
-        status.textContent = "เปิดกล้องไม่สำเร็จ: " + error.message;
+        status.textContent =
+          "เปิดกล้องไม่สำเร็จ: " + error.message;
+
         if (stream) {
           stream.getTracks().forEach(track => track.stop());
         }
+
         stream = null;
         isProcessing = false;
+      }
+    });
+
+    // ตรวจสอบว่า OpenCV พร้อมทำงานหรือยัง
+    window.addEventListener("load", () => {
+      if (
+        typeof cv !== "undefined" &&
+        cv.Mat &&
+        !isOpenCvReady
+      ) {
+        onOpenCvReady();
       }
     });
   </script>
