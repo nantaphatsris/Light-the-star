@@ -147,7 +147,7 @@
 
 <body>
   <header>
-    <h1>✳ NIGHT SKY TRACKER - RECTANGLE SELECTOR</h1>
+    <h1>✳ NIGHT SKY TRACKER</h1>
   </header>
 
   <main>
@@ -199,13 +199,26 @@
 
     let selectedPoint = null;
     let selectedQuad = null;
+
+    // ล็อกเป้าหมายจนกว่าจะรีเฟรชเว็บ
+    let targetLocked = false;
+
     let lostFrames = 0;
     let previousQuadCenter = null;
     let lastGoodXY = { x: 0, y: 0 };
+    let smoothedXY = null;
 
-    const MAX_LOST_FRAMES = 18;
-    const MIN_AREA_RATIO = 0.008;
-    const MAX_AREA_RATIO = 0.92;
+    // รอค้นหากรอบเดิมต่อ ไม่ปลดล็อกเป้าหมายเอง
+    const MAX_LOST_FRAMES = 90;
+    const MIN_AREA_RATIO = 0.005;
+    const MAX_AREA_RATIO = 0.95;
+
+    // ปรับความสมูทของพิกัด X/Y
+    // ค่ายิ่งต่ำยิ่งนิ่ง แต่ตอบสนองช้าลง
+    const XY_SMOOTHING_ALPHA = 0.18;
+
+    // ตัดการเปลี่ยนแปลงเล็กมากที่เกิดจาก noise
+    const XY_DEADBAND = 0.0015;
 
     // เตรียม OpenCV.js
     function onOpenCvReady() {
@@ -278,6 +291,9 @@
     }
 
     cameraView.addEventListener("pointerdown", (event) => {
+      // เลือกเป้าหมายได้เพียงครั้งเดียวต่อการโหลดเว็บ
+      if (targetLocked) return;
+
       const point = pointerToFrame(
         event.clientX,
         event.clientY
@@ -410,16 +426,17 @@
         cv.GaussianBlur(
           gray,
           blurred,
-          new cv.Size(5, 5),
+          new cv.Size(7, 7),
           0
         );
 
-        cv.Canny(blurred, edges, 40, 130);
+        // ลด threshold เพื่อช่วยตรวจจับขอบที่ไม่ชัด
+        cv.Canny(blurred, edges, 25, 110);
 
-        // เชื่อมช่องว่างเล็ก ๆ ของเส้นขอบ
+        // เชื่อมช่องว่างเล็ก ๆ ของเส้นขอบให้มากขึ้น
         kernel = cv.getStructuringElement(
           cv.MORPH_RECT,
-          new cv.Size(5, 5)
+          new cv.Size(7, 7)
         );
 
         cv.morphologyEx(
@@ -462,7 +479,7 @@
             cv.approxPolyDP(
               contour,
               approx,
-              0.025 * perimeter,
+              0.03 * perimeter,
               true
             );
 
@@ -539,59 +556,88 @@
       return candidates;
     }
 
-    // เลือกกรอบที่แตะ หรือค้นหากรอบเดิมต่อ
+    // เลือกกรอบที่แตะหนึ่งครั้ง แล้วติดตามเฉพาะกรอบนั้นจนรีเฟรชเว็บ
     function chooseCandidate(candidates) {
-      if (!candidates.length) return null;
+      // ยังไม่ได้ล็อก: รอให้แตะภายในกรอบที่ตรวจพบ
+      if (!targetLocked) {
+        if (!selectedPoint || !candidates.length) return null;
 
-      if (selectedPoint) {
         const tapped = candidates
-          .filter(c =>
-            polygonContainsPoint(selectedPoint, c.points)
-          )
+          .filter(c => polygonContainsPoint(selectedPoint, c.points))
           .sort((a, b) => b.area - a.area)[0];
 
-        if (tapped) {
-          selectedQuad = tapped.points;
-          previousQuadCenter = tapped.center;
-          selectedPoint = null;
-          lostFrames = 0;
+        if (!tapped) return null;
 
-          status.textContent =
-            "เลือกกรอบแล้ว กำลังติดตามกรอบที่เลือก";
+        targetLocked = true;
+        selectedQuad = tapped.points.map(p => ({ ...p }));
+        previousQuadCenter = { ...tapped.center };
+        selectedPoint = null;
+        lostFrames = 0;
 
-          return tapped;
+        status.textContent =
+          "ล็อกกรอบที่เลือกแล้ว จะไม่เปลี่ยนกรอบจนกว่าจะรีเฟรชเว็บ";
+
+        return tapped;
+      }
+
+      // ล็อกแล้ว: ไม่เลือกกรอบอื่น แม้กรอบเดิมจะหายไปชั่วคราว
+      if (!selectedQuad || !previousQuadCenter || !candidates.length) {
+        return null;
+      }
+
+      const frameDiagonal = Math.hypot(
+        canvasOutput.width,
+        canvasOutput.height
+      );
+
+      const previousArea = Math.max(
+        polygonArea(selectedQuad),
+        1
+      );
+
+      // เลือกผู้สมัครที่ใกล้ตำแหน่งเดิม และมีขนาด/รูปทรงใกล้เคียงกัน
+      const matches = candidates.map(c => {
+        const centerDistance = Math.hypot(
+          c.center.x - previousQuadCenter.x,
+          c.center.y - previousQuadCenter.y
+        );
+
+        const areaRatio = Math.max(c.area, 1) / previousArea;
+        const areaPenalty = Math.abs(Math.log(areaRatio));
+
+        let cornerDistance = 0;
+
+        for (let i = 0; i < 4; i++) {
+          cornerDistance += Math.hypot(
+            c.points[i].x - selectedQuad[i].x,
+            c.points[i].y - selectedQuad[i].y
+          );
         }
 
-        return null;
-      }
+        cornerDistance /= 4;
 
-      if (selectedQuad && previousQuadCenter) {
-        const maxDistance =
-          Math.max(
-            canvasOutput.width,
-            canvasOutput.height
-          ) * 0.22;
+        const score =
+          (centerDistance / frameDiagonal) +
+          (cornerDistance / frameDiagonal) * 0.25 +
+          areaPenalty * 0.035;
 
-        const nearby = candidates
-          .map(c => ({
-            ...c,
-            distance: Math.hypot(
-              c.center.x - previousQuadCenter.x,
-              c.center.y - previousQuadCenter.y
-            )
-          }))
-          .filter(c => c.distance <= maxDistance)
-          .sort((a, b) => a.distance - b.distance);
+        return {
+          candidate: c,
+          centerDistance,
+          areaRatio,
+          score
+        };
+      }).filter(item =>
+        item.centerDistance <= frameDiagonal * 0.30 &&
+        item.areaRatio >= 0.15 &&
+        item.areaRatio <= 6.5
+      ).sort((a, b) => a.score - b.score);
 
-        if (nearby.length) return nearby[0];
-
-        return null;
-      }
-
-      return null;
+      return matches.length ? matches[0].candidate : null;
     }
 
     // คำนวณพิกัดจุดกลางภาพในกรอบที่เลือก
+    // คงวิธีคำนวณ Perspective Transform และแกน X/Y เดิม
     function calculateNormalizedXY(quad, width, height) {
       let source = null;
       let destination = null;
@@ -641,8 +687,26 @@
         const x = Math.max(0, Math.min(1, rawX));
         const y = Math.max(0, Math.min(1, rawY));
 
-        lastGoodXY = { x, y };
+        // Exponential smoothing ลดการสั่นของ X/Y
+        if (!smoothedXY) {
+          smoothedXY = { x, y };
+        } else {
+          let dx = x - smoothedXY.x;
+          let dy = y - smoothedXY.y;
 
+          // ตัดการเปลี่ยนแปลงจิ๋ว ๆ จาก noise ของกล้อง
+          if (Math.abs(dx) < XY_DEADBAND) dx = 0;
+          if (Math.abs(dy) < XY_DEADBAND) dy = 0;
+
+          smoothedXY = {
+            x: Math.max(0, Math.min(1,
+              smoothedXY.x + dx * XY_SMOOTHING_ALPHA)),
+            y: Math.max(0, Math.min(1,
+              smoothedXY.y + dy * XY_SMOOTHING_ALPHA))
+          };
+        }
+
+        lastGoodXY = { ...smoothedXY };
         return lastGoodXY;
       } catch (error) {
         console.error("คำนวณพิกัดไม่สำเร็จ:", error);
@@ -712,17 +776,17 @@
           displayCoordinates(xy.x, xy.y, true);
 
           status.textContent =
-            "สถานะ: ตรวจพบและติดตามกรอบแล้ว";
+            "สถานะ: ตรวจพบและติดตามกรอบที่ล็อกไว้แล้ว";
 
+          // เมื่อเลือกแล้ว ซ่อนกรอบอื่นทั้งหมด
           drawFrameOverlays(
             srcMat,
-            candidates,
+            targetLocked ? [] : candidates,
             selectedQuad
           );
-        } else if (
-          selectedQuad &&
-          lostFrames < MAX_LOST_FRAMES
-        ) {
+        } else if (targetLocked && selectedQuad) {
+          // ถ้าหากกรอบหาย ให้เก็บตำแหน่งล่าสุดไว้
+          // และค้นหากรอบเดิมต่อไปโดยไม่ปลดล็อก
           lostFrames++;
 
           drawOpenCvPolygon(
@@ -739,26 +803,23 @@
           );
 
           status.textContent =
-            `สถานะ: กำลังค้นหากรอบเดิมอีกครั้ง (${lostFrames}/${MAX_LOST_FRAMES})`;
+            `สถานะ: กรอบถูกล็อกไว้ กำลังค้นหากรอบเดิมอีกครั้ง (${lostFrames} เฟรม)`;
 
           drawFrameOverlays(
             srcMat,
-            candidates,
+            [],
             selectedQuad
           );
         } else {
           lostFrames++;
 
-          if (lostFrames >= MAX_LOST_FRAMES) {
-            selectedQuad = null;
-            previousQuadCenter = null;
-          }
-
           displayCoordinates(0, 0, false);
 
           status.textContent = selectedPoint
             ? "สถานะ: แตะภายในกรอบที่ต้องการเลือก"
-            : "สถานะ: กำลังค้นหารูปทรงสี่เหลี่ยม...";
+            : targetLocked
+              ? "สถานะ: ล็อกเป้าหมายแล้ว แต่ยังไม่พบกรอบเดิม กำลังรอติดตามต่อ"
+              : "สถานะ: กำลังค้นหารูปทรงสี่เหลี่ยม...";
 
           drawFrameOverlays(
             srcMat,
@@ -823,7 +884,7 @@
       }
     }
 
-    // วาดกรอบที่ตรวจพบทั้งหมด
+    // วาดกรอบที่ตรวจพบ
     function drawFrameOverlays(
       mat,
       candidates,
@@ -872,12 +933,12 @@
         stream = null;
         camera.srcObject = null;
 
-        selectedPoint = null;
-        selectedQuad = null;
-        previousQuadCenter = null;
-        lostFrames = 0;
-
-        displayCoordinates(0, 0, false);
+        // ปิดกล้องได้ แต่คงล็อกเป้าหมายไว้จนกว่าจะรีเฟรชเว็บ
+        displayCoordinates(
+          lastGoodXY.x,
+          lastGoodXY.y,
+          targetLocked
+        );
 
         ctx.clearRect(
           0,
@@ -914,8 +975,9 @@
 
         button.textContent = "ปิดกล้อง";
 
-        status.textContent =
-          "สถานะ: กล้องทำงานแล้ว แตะภายในกรอบเพื่อเลือกเป้าหมาย";
+        status.textContent = targetLocked
+          ? "สถานะ: กล้องทำงานแล้ว กำลังติดตามกรอบที่ล็อกไว้"
+          : "สถานะ: กล้องทำงานแล้ว แตะภายในกรอบเพื่อเลือกเป้าหมาย";
 
         requestAnimationFrame(processVideo);
       } catch (error) {
